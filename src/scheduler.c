@@ -109,53 +109,79 @@ void scheduler_stop(void) {
 // proceso en estado T (stopped) justo después de crearlo.
 // ============================================================
 int scheduler_create_process(const char *path, const char *arg) {
-    // Paso 1. Validar que hay espacio en process_table.
-    //         Si process_count >= MAX_PROCESSES, imprimir error y retornar -1.
+    // Paso 1 — validar espacio en la tabla
+    if (process_count >= MAX_PROCESSES) {
+        fprintf(stderr, "Error: process table llena (max %d)\n", MAX_PROCESSES);
+        return -1;
+    }
 
-    // Paso 2. Llamar fork() y guardar el resultado en una variable pid_t.
-    //         Si fork() retorna < 0, es error: perror("fork") y retornar -1.
+    // Paso 2 — fork
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
 
-    // Paso 3. Si estamos en el HIJO (pid == 0):
-    //         a) Si platform_uses_ptrace() retorna verdadero, llamar platform_trace_child().
-    //            (En macOS esto es no-op; en Linux habilita ptrace.)
-    //         b) Llamar execl(path, path, arg, NULL) si arg != NULL,
-    //            o execl(path, path, NULL) si arg == NULL.
-    //         c) Si execl retorna, falló: perror("execl") y _exit(1).
+    // Paso 3 — código del HIJO
+    if (pid == 0) {
+        if (platform_uses_ptrace())
+            platform_trace_child();
+        if (arg)
+            execl(path, path, arg, NULL);
+        else
+            execl(path, path, NULL);
+        perror("execl");
+        _exit(1);
+    }
 
-    // Paso 4. Si estamos en el PADRE (pid > 0) Y platform_uses_ptrace() es verdadero:
-    //         a) waitpid(pid, &status, 0) para esperar el SIGTRAP post-exec.
-    //         b) Verificar WIFSTOPPED(status). Si no está detenido: matar al hijo y retornar -1.
+    // Paso 4 — PADRE: esperar el SIGTRAP que el kernel manda post-exec (solo Linux)
+    int status;
+    if (platform_uses_ptrace()) {
+        if (waitpid(pid, &status, 0) < 0 || !WIFSTOPPED(status)) {
+            kill(pid, SIGKILL);
+            return -1;
+        }
+    }
 
-    // Paso 5. Crear la entrada en el PCB:
-    //         - Calcular idx = process_count (índice libre en la tabla)
-    //         - Obtener nombre corto con basename() sobre una copia de path
-    //         - Llamar pcb_init(&process_table[idx], pid, short_name)
-    //         - Liberar la copia del path
-    //
-    //         Ejemplo:
-    //             char *path_copy = strdup(path);
-    //             char *short_name = basename(path_copy);
-    //             pcb_init(&process_table[idx], pid, short_name);
-    //             free(path_copy);
+    // Paso 5 — inicializar PCB
+    int idx = process_count;
+    char *path_copy = strdup(path);
+    char *short_name = basename(path_copy);
+    pcb_init(&process_table[idx], pid, short_name);
+    free(path_copy);
 
-    // Paso 6. (Solo si platform_uses_ptrace()) Intentar capturar registros iniciales:
-    //         a) Si platform_get_registers(pid, &process_table[idx].registers) retorna 0,
-    //            marcar process_table[idx].regs_valid = 1.
-    //         b) Llamar platform_detach(pid) para liberar el tracing.
+    // Paso 6 — capturar registros iniciales y liberar ptrace (solo Linux)
+    if (platform_uses_ptrace()) {
+        if (platform_get_registers(pid, &process_table[idx].registers) == 0)
+            process_table[idx].regs_valid = 1;
+        platform_detach(pid);  // el hijo reanuda brevemente antes del SIGSTOP
+    }
 
-    // Paso 7. Detener el proceso con platform_stop_process(pid).
-    //         Si falla: perror, matar, retornar -1.
+    // Paso 7 — detener el proceso con SIGSTOP
+    if (platform_stop_process(pid) != 0) {
+        perror("platform_stop_process");
+        kill(pid, SIGKILL);
+        return -1;
+    }
 
-    // Paso 8. waitpid(pid, &status, WUNTRACED) para confirmar que se detuvo.
-    //         Si falla: perror, matar, retornar -1.
+    // Paso 8 — confirmar que se detuvo
+    if (waitpid(pid, &status, WUNTRACED) < 0) {
+        perror("waitpid WUNTRACED");
+        kill(pid, SIGKILL);
+        return -1;
+    }
 
-    // Paso 9. Marcar el PCB como PROC_READY, incrementar process_count,
-    //         llamar rq_enqueue(idx), emitir monitor_emit_created(pid, name)
-    //         y si regs_valid, monitor_emit_registers(pid, pc, sp).
-    //         Retornar idx.
+    // Paso 9 — registrar en la tabla, encolar y emitir evento
+    process_table[idx].state = PROC_READY;
+    process_count++;
+    rq_enqueue(idx);
+    monitor_emit_created(pid, process_table[idx].name);
+    if (process_table[idx].regs_valid)
+        monitor_emit_registers(pid,
+                               process_table[idx].registers.program_counter,
+                               process_table[idx].registers.stack_pointer);
 
-    (void)path; (void)arg;  // silence unused warnings while unimplemented
-    return -1;  // TODO: reemplazar por idx real
+    return idx;
 }
 
 

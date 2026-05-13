@@ -195,21 +195,26 @@ static void cmd_runpair(const char *name) {
 //   miniOS> run programs/bin/countdown 10
 // ============================================================
 static void cmd_run(const char *path, const char *arg) {
-    // Paso 1. Si path es NULL o vacio, imprimir mensaje de uso y retornar:
-    //         "Uso: run <binario> [argumento]"
+    // Paso 1
+    if (!path || strlen(path) == 0) {
+        printf("Uso: run <binario> [argumento]\n");
+        return;
+    }
 
-    // Paso 2. Validar que el archivo existe y es ejecutable:
-    //         access(path, X_OK) == 0. Si no, imprimir error y retornar.
+    // Paso 2
+    if (access(path, X_OK) != 0) {
+        printf("Error: '%s' no encontrado o no es ejecutable.\n", path);
+        return;
+    }
 
-    // Paso 3. Crear el proceso:
-    //         int idx = scheduler_create_process(path, arg);
-    //         Si idx < 0, retornar (el scheduler ya imprimio el error).
+    // Paso 3
+    int idx = scheduler_create_process(path, arg);
+    if (idx < 0) return;
 
-    // Paso 4. Si el scheduler NO esta corriendo Y la ready queue NO esta vacia,
-    //         arrancar el scheduler con timer_get_slice() como slice:
-    //         scheduler_start(timer_get_slice());
-
-    (void)path; (void)arg;  // silence unused while unimplemented
+    // Paso 4 — arrancar el scheduler solo si es el primer proceso
+    if (!scheduler_is_running() && !rq_is_empty()) {
+        scheduler_start(timer_get_slice());
+    }
 }
 
 

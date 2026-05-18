@@ -291,8 +291,6 @@ void scheduler_sigchld(int signum) {
         for (int i = 0; i < process_count; i++) {
             if (process_table[i].pid != pid)
                 continue;
-            if (process_table[i].state == PROC_TERMINATED)
-                break;
 
             process_table[i].state = PROC_TERMINATED;
             monitor_emit_terminated(pid,
